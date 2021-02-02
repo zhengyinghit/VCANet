@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from torchvision.models.utils import load_state_dict_from_url
 
-
 __all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
            'resnet152', 'resnext50_32x4d', 'resnext101_32x8d',
            'wide_resnet50_2', 'wide_resnet101_2']
@@ -43,6 +42,24 @@ class ChannelAttention(nn.Module):
         avgout = self.sharedMLP(self.avg_pool(x))
         maxout = self.sharedMLP(self.max_pool(x))
         return self.sigmoid(avgout + maxout)
+
+
+class VisualChiralityAttention(nn.Module):
+    def __init__(self):
+        super(VisualChiralityAttention, self).__init__()
+
+        self.vca = nn.Sequential(
+            nn.Conv2d(1, 1, kernel_size=1, bias=False))
+
+        # initialization
+        for l in self.vca.modules():
+            if isinstance(l, nn.Conv2d):
+                nn.init.kaiming_normal_(l.weight, mode='fan_out', nonlinearity='relu')
+
+    def forward(self, x):
+        x = torch.mean(x, dim=1, keepdim=True)
+        out = self.vca(x)
+        return out
 
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
@@ -184,6 +201,9 @@ class ResNet(nn.Module):
         # Channel Attention
         self.ca = ChannelAttention(512 * block.expansion)
 
+        # Visual Chirality Attention
+        self.vca = VisualChiralityAttention()
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -225,8 +245,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def _forward_impl(self, x, vc_att):
-        # See note [TorchScript super()]
+    def _forward_impl(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -239,16 +258,17 @@ class ResNet(nn.Module):
 
         x = x + self.ca(x) * x
 
-        x = x + vc_att * x
+        vca_map = self.vca(x)
+        x = x + vca_map * x
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
 
-        return x
+        return x, vca_map
 
-    def forward(self, x, vc_att):
-        return self._forward_impl(x, vc_att)
+    def forward(self, x):
+        return self._forward_impl(x)
 
 
 def _resnet(arch, block, layers, pretrained, progress, **kwargs):
