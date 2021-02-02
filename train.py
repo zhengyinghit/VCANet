@@ -10,12 +10,8 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 from torchvision import datasets, transforms
 from torchvision.models.resnet import resnet50 as resnet_vc
-from vcanet import resnet50, resnet101, resnet152, resnext101_32x8d
+from vcanet import resnet50
 import util
-
-gpu_id = '0'
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
 
 # Data augmentation and normalization for training
 # Just normalization for validation
@@ -62,14 +58,13 @@ def return_vcattention(feature_conv, weights, prediction):
     return vc_att
 
 
-def train_model(model, model_vc, criterion, optimizer, scheduler, num_epochs=25):
+def train_model(model, model_vc, optimizer, scheduler, num_epochs=25):
     since = time.time()
 
     # hook the feature extractor
     features_blobs = []
 
     def hook_feature(module, input, output):
-        # features_blobs.append(output.data.cpu().numpy())
         features_blobs.append(output)
 
     # get the output feature map of layer4
@@ -126,9 +121,18 @@ def train_model(model, model_vc, criterion, optimizer, scheduler, num_epochs=25)
                 # Forward
                 # Track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs, vc_att)
+                    outputs, vca_map = model(inputs)
                     _, preds = torch.max(outputs, 1)
-                    loss = criterion(outputs, labels)
+
+                    # classification loss
+                    criterion_1 = nn.CrossEntropyLoss()
+                    loss_c = criterion_1(outputs, labels)
+
+                    # distillation loss
+                    criterion_2 = nn.MSELoss()
+                    loss_d = criterion_2(vc_att, vca_map)
+
+                    loss = loss_c + loss_d
 
                     # Backward + optimize only if in training phase
                     if phase == 'train':
@@ -137,7 +141,10 @@ def train_model(model, model_vc, criterion, optimizer, scheduler, num_epochs=25)
 
                 # Print the logger info
                 batch_size = inputs.shape[0]
-                metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
+                metric_logger.update(loss=loss.item(),
+                                     loss_c=loss_c.item(),
+                                     loss_d=loss_d.item(),
+                                     lr=optimizer.param_groups[0]["lr"])
                 metric_logger.meters['img/s'].update(batch_size / (time.time() - start_time))
 
                 # Statistics
@@ -160,7 +167,7 @@ def train_model(model, model_vc, criterion, optimizer, scheduler, num_epochs=25)
         print()
 
     # save the best model to local file
-    save_path = 'vcanet_resnet50.pth'
+    save_path = 'models_vca/r50_vca.pth'
     torch.save(best_model.state_dict(), save_path)
 
     time_elapsed = time.time() - since
@@ -170,10 +177,14 @@ def train_model(model, model_vc, criterion, optimizer, scheduler, num_epochs=25)
     mes2 = 'Best val Acc: {:4f}'.format(best_acc)
     print(mes2)
 
+    with open('logs_vca/log_r50', 'a') as f:
+        f.write('{}\n'.format(mes1))
+        f.write(mes2)
+
 
 def main():
-    # load the model of visual chirality
-    model_path = 'resnet50_vc.pth'
+    # load the pretrained model of visual chirality classification
+    model_path = 'r50_vc.pth'
 
     model_vc = resnet_vc(pretrained=False)
     num_ftrs = model_vc.fc.in_features
@@ -194,8 +205,6 @@ def main():
 
     model_ft = model_ft.cuda()
 
-    criterion = nn.CrossEntropyLoss()
-
     # Observe that all parameters are being optimized.
     optimizer_ft = optim.SGD(model_ft.parameters(), lr=0.001, momentum=0.9)
 
@@ -203,7 +212,7 @@ def main():
     exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
 
     # Training
-    train_model(model_ft, model_vc, criterion, optimizer_ft, exp_lr_scheduler, num_epochs=25)
+    train_model(model_ft, model_vc, optimizer_ft, exp_lr_scheduler, num_epochs=25)
 
 
 if __name__ == "__main__":
